@@ -1,6 +1,5 @@
 package com.panin.testtask.weatherservice.weatherproviders;
 
-import com.panin.testtask.weatherservice.weatherproviders.WeatherProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -14,13 +13,13 @@ public class ProviderManager {
 
     @Autowired
     public ProviderManager(List<WeatherProvider> providerList) {
-        weatherProviders=new HashMap<>();
+        weatherProviders = new HashMap<>();
         for (WeatherProvider provider : providerList) {
-            weatherProviders.put(provider.getWeatherProviderName(),provider);
+            weatherProviders.put(provider.getWeatherProviderName().toLowerCase(), provider);
         }
     }
 
-    public WeatherProvider getWeatherProvider(String service){
+    public WeatherProvider getWeatherProvider(String service) {
         return weatherProviders.get(service);
     }
 }

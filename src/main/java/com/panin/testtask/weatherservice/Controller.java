@@ -1,120 +1,102 @@
 package com.panin.testtask.weatherservice;
 
-import com.panin.testtask.weatherservice.domain.WeatherHolder;
-import com.panin.testtask.weatherservice.exceptions.BadRequestException;
-import com.panin.testtask.weatherservice.exceptions.ServiceNotSupportedException;
-import com.panin.testtask.weatherservice.exceptions.WeatherServiceException;
-import com.panin.testtask.weatherservice.repos.WeatherHolderRepo;
+import com.panin.testtask.weatherservice.domain.Weather;
+import com.panin.testtask.weatherservice.errors.exceptions.BadRequestException;
+import com.panin.testtask.weatherservice.errors.exceptions.ServiceNotSupportedException;
+import com.panin.testtask.weatherservice.repos.WeatherRepo;
 import com.panin.testtask.weatherservice.weatherproviders.ProviderManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
-import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
+import java.util.Date;
 import java.util.List;
 
 
 @RestController
 public class Controller {
-    private WeatherHolderRepo weatherHolderRepo;
+    private WeatherRepo weatherRepo;
     private ProviderManager providerManager;
     private int thresholdSeconds;
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(Controller.class);
+
     @Autowired
-    public Controller(WeatherHolderRepo weatherHolderRepo, ProviderManager providerManager,
+    public Controller(WeatherRepo weatherRepo,
+                      ProviderManager providerManager,
                       @Value("${app.thresholdseconds}") int thresholdSeconds) {
-        this.weatherHolderRepo = weatherHolderRepo;
+
+        this.weatherRepo = weatherRepo;
         this.providerManager = providerManager;
         this.thresholdSeconds = thresholdSeconds;
     }
 
     @GetMapping(produces = {"application/JSON"})
-    public ResponseEntity<String> getWeather(@RequestParam(required = false) String service,
-                                             @RequestParam(required = false) String city) {
+    public Weather get(@RequestParam(required = false) String service,
+                       @RequestParam(required = false) String city) {
 
+        LOGGER.debug("Start of request processing: city='{}', service='{}'.", city, service);
 
-        if (service == null || city == null) {
-            throw new BadRequestException();
+        if (service == null || service.isEmpty()) {
+            throw new BadRequestException("The service is not set");
+        }
+
+        if (city == null || city.isEmpty()) {
+            throw new BadRequestException("The city is not set");
         }
 
         service = service.toLowerCase();
         city = city.toLowerCase();
 
         if (providerManager.getWeatherProvider(service) == null)
-            throw new ServiceNotSupportedException();
+            throw new ServiceNotSupportedException("The service '" + service + "' is not supported.");
 
-        ResponseEntity<String> response = null;
-        WeatherHolder weatherHolder = getWeatherHolderFromCache(service, city);
-        if (weatherHolder == null) {
-            response = saveAndGetResponse(service, city);
-        } else {
-            if (timeIsUp(weatherHolder)) {
-                response = updateAndGetResponse(weatherHolder);
-            } else {
-                response = getResponse(weatherHolder);
-            }
+        Weather weather = getWeatherFromCache(service, city);
+        if (weather == null)
+            weather = getAndSaveWeather(service, city);
+        else if (timeIsUp(weather))
+            weather = getAndUpdateWeather(weather);
+
+        LOGGER.debug("The request has been processed. Result: {}", weather);
+
+        return weather;
+    }
+
+
+    private Weather getWeatherFromCache(String service, String city) {
+        LOGGER.debug("Getting data from the database.");
+
+        List<Weather> weatherList = weatherRepo.findByCityAndService(city, service);
+        Weather weather = null;
+        if (!weatherList.isEmpty())
+            weather = weatherList.get(0);
+        return weather;
+    }
+
+    private Weather getAndUpdateWeather(Weather weather) {
+        LOGGER.debug("Deletion data from the database.");
+
+        weatherRepo.delete(weather);
+        return getAndSaveWeather(weather.getService(), weather.getCity());
+    }
+
+    private Weather getAndSaveWeather(String service, String city) {
+        Weather weather = providerManager.getWeatherProvider(service).getWeather(city);
+        if (weather != null) {
+            LOGGER.debug("Saving data to the database.");
+            weatherRepo.save(weather);
         }
-
-        return response;
+        return weather;
     }
 
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity error(Exception e) {
-
-        if (e instanceof WeatherServiceException) {
-            WeatherServiceException ex = (WeatherServiceException) e;
-            return ResponseEntity.status(ex.getHttpStatus())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(ex.getJSONMessage());
-        }
-
-        if (e instanceof HttpStatusCodeException) {
-            HttpStatusCodeException ex = (HttpStatusCodeException) e;
-            return ResponseEntity.status(ex.getRawStatusCode())
-                    .headers(ex.getResponseHeaders())
-                    .body(ex.getResponseBodyAsString());
-        }
-
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body("{\"cod\":\"500\",\"message\":\"internal error\"}");
-
-    }
-
-    private ResponseEntity<String> getResponse(WeatherHolder weatherHolder) {
-        return new ResponseEntity<String>(weatherHolder.getResponseHolder(), HttpStatus.OK);
-    }
-
-    private WeatherHolder getWeatherHolderFromCache(String service, String city) {
-        List<WeatherHolder> weatherHolderList = weatherHolderRepo.findByCityAndService(city, service);
-        WeatherHolder weatherHolder = null;
-        if (!weatherHolderList.isEmpty())
-            weatherHolder = weatherHolderList.get(0);
-        return weatherHolder;
-    }
-
-    private ResponseEntity<String> updateAndGetResponse(WeatherHolder weatherHolder) {
-        weatherHolderRepo.delete(weatherHolder);
-        return saveAndGetResponse(weatherHolder.getService(), weatherHolder.getCity());
-    }
-
-    private ResponseEntity<String> saveAndGetResponse(String service, String city) {
-        ResponseEntity<String> response = providerManager.getWeatherProvider(service).getWeatherResponse(city);
-        if (response.getStatusCode().equals(HttpStatus.OK)) {
-            WeatherHolder weatherHolder = new WeatherHolder(service, city, response.getBody(), LocalDateTime.now());
-            weatherHolderRepo.save(weatherHolder);
-        }
-        return response;
-    }
-
-    private boolean timeIsUp(WeatherHolder weatherHolder) {
-        LocalDateTime weatherDate = weatherHolder.getDate();
-        LocalDateTime threshold = LocalDateTime.now().minus(thresholdSeconds, ChronoUnit.SECONDS);
-        return weatherDate.isBefore(threshold);
+    private boolean timeIsUp(Weather weather) {
+        Date weatherDate = weather.getDate();
+        Date threshold = new Date(new Date().getTime() - thresholdSeconds * 1000);
+        return weatherDate.before(threshold);
     }
 
 
